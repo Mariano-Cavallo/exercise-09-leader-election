@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from fastapi import Depends, FastAPI, HTTPException, Response
 from sqlalchemy import text
@@ -5,9 +6,22 @@ from sqlalchemy.orm import Session
 from src.database import Base, engine, get_db
 from src.models import Node
 from src.schemas import NodeCreate, NodeResponse, NodeUpdate
+from src import election
 
-Base.metadata.create_all(bind=engine)
-app = FastAPI()
+import time as _time
+for _attempt in range(10):
+    try:
+        Base.metadata.create_all(bind=engine, checkfirst=True)
+        break
+    except Exception:
+        _time.sleep(1)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    election.start_background_tasks()
+    yield
+
+app = FastAPI(lifespan=lifespan)
 
 @app.get("/health")
 def health(db: Session = Depends(get_db)):
@@ -64,3 +78,21 @@ def delete_node(name: str, db: Session = Depends(get_db)):
     node.updated_at = datetime.now(timezone.utc)
     db.commit()
     return Response(status_code=204)
+
+# --- Election endpoints ---
+
+@app.post("/election/message")
+def receive_election(payload: dict):
+    sender_id = payload.get("sender_id")
+    election.handle_election_message(sender_id)
+    return {"ok": True}
+
+@app.post("/election/coordinator")
+def receive_coordinator(payload: dict):
+    leader_id = payload.get("leader_id")
+    election.set_leader(leader_id)
+    return {"ok": True}
+
+@app.get("/election/leader")
+def get_leader():
+    return election.get_leader()
